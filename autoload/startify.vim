@@ -403,6 +403,15 @@ function! startify#open_buffers(...) abort
   endif
 endfunction
 
+" Function: #toggle_show_dotfiles {{{1
+function! startify#toggle_show_dotfiles() abort
+  if get(g:, 'startify_show_dotfiles') == 1
+    let g:startify_show_dotfiles = 0
+  else
+    let g:startify_show_dotfiles = 1
+  endif
+endfunction
+
 " Function: s:get_lists {{{1
 function! s:get_lists() abort
   if exists('g:startify_lists')
@@ -514,10 +523,7 @@ function! s:set_custom_section(section) abort
 endfunction
 
 " Function: s:display_by_path {{{1
-function! s:display_by_path(path_prefix, path_format, use_env) abort
-  let oldfiles = call(get(g:, 'startify_enable_unsafe') ? 's:filter_oldfiles_unsafe' : 's:filter_oldfiles',
-        \ [a:path_prefix, a:path_format, a:use_env])
-
+function! s:display_by_path(entries) abort
   let entry_format = "s:padding_left .'['. index .']'. repeat(' ', (3 - strlen(index))) ."
   if exists('*StartifyEntryFormat')
     let entry_format .= StartifyEntryFormat()
@@ -525,12 +531,12 @@ function! s:display_by_path(path_prefix, path_format, use_env) abort
     let entry_format .= 'entry_path'
   endif
 
-  if !empty(oldfiles)
+  if !empty(a:entries)
     if exists('s:last_message')
       call s:print_section_header()
     endif
 
-    for [absolute_path, entry_path] in oldfiles
+    for [absolute_path, entry_path] in a:entries
       let index = s:get_index_as_string()
       call append('$', eval(entry_format))
       if has('win32')
@@ -636,12 +642,55 @@ endfunction
 
 " Function: s:show_dir {{{1
 function! s:show_dir() abort
-  return s:display_by_path(getcwd() . s:sep, ':.', 0)
+  let oldfiles = call(get(g:, 'startify_enable_unsafe') ? 's:filter_oldfiles_unsafe' : 's:filter_oldfiles',
+        \ [getcwd() . s:sep, ':.', 0])
+  return s:display_by_path(oldfiles)
+endfunction
+
+" Function: s:show_allindir {{{1
+function! s:show_allindir() abort
+  let files = []
+  let currentdir = split(glob('*'), '\n')
+
+  if get(g:, 'startify_show_dotfiles')
+    let currentdir += filter(split(glob('.*'), '\n'), 'v:val != "." && v:val != ".."')
+  endif
+
+  call sort(currentdir, 'i')
+
+  let path = getcwd()
+  for file in currentdir
+      let display = file
+      if isdirectory(file)
+        let display = display . s:sep
+      endif
+
+      let files += [[path . s:sep . file, display]]
+  endfor
+
+  function! s:sort_by_dot(foo, bar)
+    let foo = strpart(a:foo[1], 0, 1)
+    let bar = strpart(a:bar[1], 0, 1)
+    return foo == bar ? 0 : (bar == '.' ? 1 : -1)
+  endfunction
+
+  function! s:sort_by_directory(foo, bar)
+    let foo = strpart(a:foo[1], strlen(a:foo[1])-1, 1)
+    let bar = strpart(a:bar[1], strlen(a:bar[1])-1, 1)
+    return foo == bar ? 0 : (bar == '/' ? 1 : -1)
+  endfunction
+
+  call sort(files, 's:sort_by_dot')
+  call sort(files, 's:sort_by_directory')
+
+  return s:display_by_path(files)
 endfunction
 
 " Function: s:show_files {{{1
 function! s:show_files() abort
-  return s:display_by_path('', s:relative_path, get(g:, 'startify_use_env'))
+  let oldfiles = call(get(g:, 'startify_enable_unsafe') ? 's:filter_oldfiles_unsafe' : 's:filter_oldfiles',
+        \ ['', s:relative_path, get(g:, 'startify_use_env')])
+  return s:display_by_path(oldfiles)
 endfunction
 
 " Function: s:show_sessions {{{1
@@ -819,6 +868,7 @@ function! s:set_mappings() abort
   nnoremap <buffer><nowait><silent> <LeftMouse>   :call <sid>leftmouse()<cr>
   nnoremap <buffer><nowait><silent> <2-LeftMouse> :call startify#open_buffers()<cr>
   nnoremap <buffer><nowait><silent> <MiddleMouse> :enew <bar> execute 'normal! "'.(v:register=='"'?'*':v:register).'gp'<cr>
+  nnoremap <buffer><nowait><silent> .             :call startify#toggle_show_dotfiles()<cr>:Startify<cr>
 
   " Without these mappings n/N wouldn't work properly, since autocmds always
   " force the cursor back on the index.
