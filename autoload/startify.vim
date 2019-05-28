@@ -19,6 +19,18 @@ function! startify#get_separator() abort
   return !exists('+shellslash') || &shellslash ? '/' : '\'
 endfunction
 
+" Function: set_browserpath {{{1
+function! s:set_browserpath(path) abort
+  let b:startify.browser.path = (a:path == '' || s:endswithsep(a:path)) ? a:path : a:path . s:sep
+  let b:startify.browser.pathchanged = 1
+endfunction
+
+"Function: #return_to_cwd {{{1
+function! startify#return_to_cwd() abort
+  call s:set_browserpath(getcwd())
+  call startify#insane_in_the_membrane(0)
+endfunction
+
 " Function: #insane_in_the_membrane {{{1
 function! startify#insane_in_the_membrane(on_vimenter) abort
   " Handle vim -y, vim -M.
@@ -38,6 +50,8 @@ function! startify#insane_in_the_membrane(on_vimenter) abort
       endif
     endfor
   endif
+
+  let oldsettings = get(b:, 'startify', {})
 
   if line2byte('$') != -1
     noautocmd enew
@@ -71,6 +85,8 @@ function! startify#insane_in_the_membrane(on_vimenter) abort
   call append('$', g:startify_header)
 
   let b:startify = { 'tick': 0, 'entries': {}, 'indices': [] }
+  let b:startify.browser = {}
+  call s:set_browserpath(get(get(oldsettings, 'browser', {}), 'path', getcwd()))
 
   if s:show_special
     call append('$', [s:padding_left .'[e]  <empty buffer>', ''])
@@ -126,7 +142,13 @@ function! startify#insane_in_the_membrane(on_vimenter) abort
   setlocal nomodifiable nomodified
 
   call s:set_mappings()
-  call cursor(b:startify.firstline, 5)
+
+  if get(g:, 'startify_browser_startup_jump', 0) || !get(g:, 'startify_prevent_browser_cursor_lock', 0) && get(oldsettings.browser, 'pathchanged', 0)
+    call cursor(b:startify.browser.firstline, 5)
+  else
+    call cursor(b:startify.firstline, 5)
+  endif
+
   autocmd startify CursorMoved <buffer> call s:set_cursor()
 
   silent! %foldopen!
@@ -403,6 +425,15 @@ function! startify#open_buffers(...) abort
   endif
 endfunction
 
+" Function: #toggle_show_dotfiles {{{1
+function! startify#toggle_show_dotfiles() abort
+  if get(g:, 'startify_show_dotfiles') == 1
+    let g:startify_show_dotfiles = 0
+  else
+    let g:startify_show_dotfiles = 1
+  endif
+endfunction
+
 " Function: s:get_lists {{{1
 function! s:get_lists() abort
   if exists('g:startify_lists')
@@ -487,6 +518,13 @@ function! s:open_buffer(entry)
     execute a:entry.cmd
   elseif a:entry.type == 'session'
     execute a:entry.cmd a:entry.path
+  elseif a:entry.type == 'dir'
+    if !s:can_read_path(a:entry.path)
+      return
+    endif
+
+    call s:set_browserpath(a:entry.path)
+    call startify#insane_in_the_membrane(0)
   elseif a:entry.type == 'file'
     if line2byte('$') == -1
       execute 'edit' a:entry.path
@@ -514,10 +552,7 @@ function! s:set_custom_section(section) abort
 endfunction
 
 " Function: s:display_by_path {{{1
-function! s:display_by_path(path_prefix, path_format, use_env) abort
-  let oldfiles = call(get(g:, 'startify_enable_unsafe') ? 's:filter_oldfiles_unsafe' : 's:filter_oldfiles',
-        \ [a:path_prefix, a:path_format, a:use_env])
-
+function! s:display_by_path(entries) abort
   let entry_format = "s:padding_left .'['. index .']'. repeat(' ', (3 - strlen(index))) ."
   if exists('*StartifyEntryFormat')
     let entry_format .= StartifyEntryFormat()
@@ -525,18 +560,18 @@ function! s:display_by_path(path_prefix, path_format, use_env) abort
     let entry_format .= 'entry_path'
   endif
 
-  if !empty(oldfiles)
+  if !empty(a:entries)
     if exists('s:last_message')
       call s:print_section_header()
     endif
 
-    for [absolute_path, entry_path] in oldfiles
+    for [type, absolute_path, entry_path] in a:entries
       let index = s:get_index_as_string()
       call append('$', eval(entry_format))
       if has('win32')
         let absolute_path = substitute(absolute_path, '\[', '\[[]', 'g')
       endif
-      call s:register(line('$'), index, 'file', 'edit', absolute_path)
+      call s:register(line('$'), index, type, 'edit', absolute_path)
     endfor
 
     call append('$', '')
@@ -579,7 +614,7 @@ function! s:filter_oldfiles(path_prefix, path_format, use_env) abort
 
     let entries[absolute_path]  = 1
     let counter                -= 1
-    let oldfiles += [[fnameescape(absolute_path), entry_path]]
+    let oldfiles += [['file', fnameescape(absolute_path), entry_path]]
   endfor
 
   if a:use_env
@@ -596,6 +631,14 @@ function! s:filter_oldfiles(path_prefix, path_format, use_env) abort
   endif
 
   return oldfiles
+endfunction
+
+" Function: s:can_read_path {{{1
+function! s:can_read_path(path) abort
+  let path = s:stripendingsep(a:path)
+  let files = split(glob(path . s:sep . '.'), "\n")
+
+  return len(files) > 0
 endfunction
 
 " Function: s:filter_oldfiles_unsafe {{{1
@@ -628,7 +671,7 @@ function! s:filter_oldfiles_unsafe(path_prefix, path_format, use_env) abort
     let entry_path              = fnamemodify(absolute_path, a:path_format)
     let entries[absolute_path]  = 1
     let counter                -= 1
-    let oldfiles               += [[fnameescape(absolute_path), entry_path]]
+    let oldfiles               += [['file', fnameescape(absolute_path), entry_path]]
   endfor
 
   return oldfiles
@@ -636,12 +679,83 @@ endfunction
 
 " Function: s:show_dir {{{1
 function! s:show_dir() abort
-  return s:display_by_path(getcwd() . s:sep, ':.', 0)
+  let oldfiles = call(get(g:, 'startify_enable_unsafe') ? 's:filter_oldfiles_unsafe' : 's:filter_oldfiles',
+        \ [getcwd() . s:sep, ':.', 0])
+  return s:display_by_path(oldfiles)
+endfunction
+
+" Function: s:show_browser {{{1
+function! s:show_browser() abort
+  let browser = get(get(b:, 'startify', {}), 'browser', {})
+  let path = browser.path
+  let files = []
+  let currentdir = path == s:sep ? [] : [path . '..']
+  let currentdir += split(glob(path . '*'), "\n")
+
+  if get(g:, 'startify_show_dotfiles')
+    let currentdir += filter(split(glob(path . '.*'), "\n"), 'v:val != "' . path . '." && v:val != "' . path . '.."')
+  endif
+
+  call sort(currentdir, 'i')
+
+  for file in currentdir
+    let isdir = strpart(file, strlen(file)-2, strlen(file)) == '..' || isdirectory(file)
+    let entry_path = strpart(file, strlen(path), strlen(file))
+    let entry_path = isdir ? entry_path . s:sep : entry_path
+    let type = isdir ? 'dir' : 'file'
+    let absolute_path = entry_path  == ".." . s:sep ? s:striplastdirsegment(path) : file
+    let files += [[type, absolute_path, entry_path]]
+  endfor
+
+  function! s:sort_by_dot(foo, bar)
+    let foo = strpart(a:foo[2], 0, 1)
+    let bar = strpart(a:bar[2], 0, 1)
+    return foo == bar ? 0 : (bar == '.' ? 1 : -1)
+  endfunction
+
+  function! s:sort_by_directory(foo, bar)
+    let foo = strpart(a:foo[2], strlen(a:foo[2])-1, 1)
+    let bar = strpart(a:bar[2], strlen(a:bar[2])-1, 1)
+    return foo == bar ? 0 : (bar == '/' ? 1 : -1)
+  endfunction
+
+  call sort(files, 's:sort_by_dot')
+  call sort(files, 's:sort_by_directory')
+
+  let s:last_message = ['   ' . path]
+  let b:startify.browser.firstline = len(files) > 1 && path != s:sep ? line('$') + 4 : line('$') + 3
+  let result = s:display_by_path(files)
+
+  return result
+endfunction
+
+" Function s:endswithsep {{{1
+function! s:endswithsep(path) abort
+  return strpart(a:path, strlen(a:path)-1, 1) == s:sep
+endfunction
+
+" Function s:stripendingsep {{{1
+function! s:stripendingsep(path) abort
+  if !s:endswithsep(a:path)
+    return a:path
+  endif
+
+  return strpart(a:path, 0, strlen(a:path)-1)
+endfunction
+
+" Function: s:striplastdirsegment {{{1
+function! s:striplastdirsegment(path) abort
+  let endswithsep = s:endswithsep(a:path)
+  let fullpath = s:stripendingsep(a:path)
+  let path = strpart(fullpath, 0, strridx(fullpath, s:sep))
+  return endswithsep ? path . s:sep : path
 endfunction
 
 " Function: s:show_files {{{1
 function! s:show_files() abort
-  return s:display_by_path('', s:relative_path, get(g:, 'startify_use_env'))
+  let oldfiles = call(get(g:, 'startify_enable_unsafe') ? 's:filter_oldfiles_unsafe' : 's:filter_oldfiles',
+        \ ['', s:relative_path, get(g:, 'startify_use_env')])
+  return s:display_by_path(oldfiles)
 endfunction
 
 " Function: s:show_sessions {{{1
@@ -819,6 +933,8 @@ function! s:set_mappings() abort
   nnoremap <buffer><nowait><silent> <LeftMouse>   :call <sid>leftmouse()<cr>
   nnoremap <buffer><nowait><silent> <2-LeftMouse> :call startify#open_buffers()<cr>
   nnoremap <buffer><nowait><silent> <MiddleMouse> :enew <bar> execute 'normal! "'.(v:register=='"'?'*':v:register).'gp'<cr>
+  nnoremap <buffer><nowait><silent> .             :call startify#toggle_show_dotfiles()<cr>:Startify<cr>
+  nnoremap <buffer><nowait><silent> ?             :call startify#return_to_cwd()<cr>
 
   " Without these mappings n/N wouldn't work properly, since autocmds always
   " force the cursor back on the index.
