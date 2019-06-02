@@ -19,6 +19,11 @@ function! startify#get_separator() abort
   return !exists('+shellslash') || &shellslash ? '/' : '\'
 endfunction
 
+" Function: set_browserdepth {{{1
+function! s:set_browserdepth(path) abort
+  let b:startify.browserdepth = (a:path == "" || s:endswithsep(a:path)) ? a:path : a:path . s:sep
+endfunction
+
 " Function: #insane_in_the_membrane {{{1
 function! startify#insane_in_the_membrane(on_vimenter) abort
   " Handle vim -y, vim -M.
@@ -38,6 +43,8 @@ function! startify#insane_in_the_membrane(on_vimenter) abort
       endif
     endfor
   endif
+
+  let oldsettings = get(b:, "startify", {})
 
   if line2byte('$') != -1
     noautocmd enew
@@ -71,6 +78,13 @@ function! startify#insane_in_the_membrane(on_vimenter) abort
   call append('$', g:startify_header)
 
   let b:startify = { 'tick': 0, 'entries': {}, 'indices': [] }
+  let b:startify.cwd = getcwd()
+
+  if oldsettings == {}
+    call s:set_browserdepth("")
+  else
+    call s:set_browserdepth(get(oldsettings, 'browserdepth', ""))
+  endif
 
   if s:show_special
     call append('$', [s:padding_left .'[e]  <empty buffer>', ''])
@@ -126,7 +140,13 @@ function! startify#insane_in_the_membrane(on_vimenter) abort
   setlocal nomodifiable nomodified
 
   call s:set_mappings()
-  call cursor(b:startify.firstline, 5)
+
+  if !get(g:, 'startify_prevent_browser_cursor_lock', 0) && get(oldsettings, 'jumptobrowser', 0)
+    call cursor(b:startify.browserline, 5)
+  else
+    call cursor(b:startify.firstline, 5)
+  endif
+
   autocmd startify CursorMoved <buffer> call s:set_cursor()
 
   silent! %foldopen!
@@ -496,6 +516,10 @@ function! s:open_buffer(entry)
     execute a:entry.cmd
   elseif a:entry.type == 'session'
     execute a:entry.cmd a:entry.path
+  elseif a:entry.type == 'dir'
+    call s:set_browserdepth(a:entry.path)
+    let b:startify.jumptobrowser = 1
+    call startify#insane_in_the_membrane(0)
   elseif a:entry.type == 'file'
     if line2byte('$') == -1
       execute 'edit' a:entry.path
@@ -536,13 +560,13 @@ function! s:display_by_path(entries) abort
       call s:print_section_header()
     endif
 
-    for [absolute_path, entry_path] in a:entries
+    for [type, absolute_path, entry_path] in a:entries
       let index = s:get_index_as_string()
       call append('$', eval(entry_format))
       if has('win32')
         let absolute_path = substitute(absolute_path, '\[', '\[[]', 'g')
       endif
-      call s:register(line('$'), index, 'file', 'edit', absolute_path)
+      call s:register(line('$'), index, type, 'edit', absolute_path)
     endfor
 
     call append('$', '')
@@ -585,7 +609,7 @@ function! s:filter_oldfiles(path_prefix, path_format, use_env) abort
 
     let entries[absolute_path]  = 1
     let counter                -= 1
-    let oldfiles += [[fnameescape(absolute_path), entry_path]]
+    let oldfiles += [['file', fnameescape(absolute_path), entry_path]]
   endfor
 
   if a:use_env
@@ -634,7 +658,7 @@ function! s:filter_oldfiles_unsafe(path_prefix, path_format, use_env) abort
     let entry_path              = fnamemodify(absolute_path, a:path_format)
     let entries[absolute_path]  = 1
     let counter                -= 1
-    let oldfiles               += [[fnameescape(absolute_path), entry_path]]
+    let oldfiles               += [['file', fnameescape(absolute_path), entry_path]]
   endfor
 
   return oldfiles
@@ -647,43 +671,77 @@ function! s:show_dir() abort
   return s:display_by_path(oldfiles)
 endfunction
 
-" Function: s:show_allindir {{{1
-function! s:show_allindir() abort
+" Function: s:show_browser {{{1
+function! s:show_browser() abort
+  let basepath = get(get(b:, 'startify', {}), 'cwd')
+  let browserdepth = get(get(b:, 'startify', {}), 'browserdepth')
+
   let files = []
-  let currentdir = split(glob('*'), '\n')
+  let currentdir = browserdepth == "" ? [] : split(glob(browserdepth . '..'), '\n')
+  let currentdir += split(glob(browserdepth . '*'), '\n')
 
   if get(g:, 'startify_show_dotfiles')
-    let currentdir += filter(split(glob('.*'), '\n'), 'v:val != "." && v:val != ".."')
+    let currentdir += filter(split(glob(browserdepth . '.*'), '\n'), 'v:val != "' . browserdepth . '." && v:val != "' . browserdepth . '.."')
   endif
 
   call sort(currentdir, 'i')
 
-  let path = getcwd()
   for file in currentdir
-      let display = file
-      if isdirectory(file)
-        let display = display . s:sep
-      endif
+    let isdir = isdirectory(file)
+    let entry_path = isdir ? file . s:sep : file
+    let entry_path = strpart(entry_path, strlen(browserdepth), strlen(entry_path))
 
-      let files += [[path . s:sep . file, display]]
+    if isdir
+      let browserdepth_path = (entry_path == "../") ? s:striplastdirsegment(browserdepth) : browserdepth . entry_path
+      let files += [['dir', browserdepth_path, entry_path]]
+    else
+      let absolute_path = basepath . s:sep . file
+      let files += [['file', absolute_path, entry_path]]
+    endif
   endfor
 
   function! s:sort_by_dot(foo, bar)
-    let foo = strpart(a:foo[1], 0, 1)
-    let bar = strpart(a:bar[1], 0, 1)
+    let foo = strpart(a:foo[2], 0, 1)
+    let bar = strpart(a:bar[2], 0, 1)
     return foo == bar ? 0 : (bar == '.' ? 1 : -1)
   endfunction
 
   function! s:sort_by_directory(foo, bar)
-    let foo = strpart(a:foo[1], strlen(a:foo[1])-1, 1)
-    let bar = strpart(a:bar[1], strlen(a:bar[1])-1, 1)
+    let foo = strpart(a:foo[2], strlen(a:foo[2])-1, 1)
+    let bar = strpart(a:bar[2], strlen(a:bar[2])-1, 1)
     return foo == bar ? 0 : (bar == '/' ? 1 : -1)
   endfunction
 
   call sort(files, 's:sort_by_dot')
   call sort(files, 's:sort_by_directory')
 
-  return s:display_by_path(files)
+  let result = s:display_by_path(files)
+
+  if !get(get(b:, 'startify', {}), 'browserline', 0)
+    let b:startify.browserline = line('$') - len(files)
+  endif
+
+  return result
+endfunction
+
+" Function s:endswithsep {{{1
+function! s:endswithsep(path) abort
+  return strpart(a:path, strlen(a:path)-1, 1) == s:sep
+endfunction
+
+" Function s:stripendingsep {{{1
+function! s:stripendingsep(path) abort
+  if !s:endswithsep(a:path)
+    return a:path
+  endif
+
+  return strpart(a:path, 0, strlen(a:path)-1)
+endfunction
+
+" Function: s:striplastdirsegment {{{1
+function! s:striplastdirsegment(path) abort
+  let fullpath = s:stripendingsep(a:path)
+  return strpart(fullpath, 0, strridx(fullpath, s:sep))
 endfunction
 
 " Function: s:show_files {{{1
